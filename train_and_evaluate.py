@@ -8,9 +8,32 @@ import pandas as pd
 
 device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
-def train_and_test(
-    model, train_dl, test_dl, loss_fn, optimizer, epochs
-):
+class EarlyStopping():
+    
+    def __init__(self, patience=3, delta=0.01, verbose=True):
+        
+        self.patience = patience
+        self.delta = delta
+        self.verbose=verbose
+        self.best_loss=None
+        self.no_improvement_count=0
+        self.stop_training=False
+    
+    def check_early_stop(self, val_loss):
+
+        if self.best_loss is None or val_loss < self.best_loss - self.delta:
+            self.best_loss = val_loss
+            self.no_improvement_count = 0
+        else:
+            self.no_improvement_count =+1
+            if self.no_improvement_count >= self.patience:
+                self.stop_training=True
+                if self.verbose:
+                    print("Stopping early as no improvment was observed")
+
+early_stopping = EarlyStopping()
+
+def train_and_test(model, train_dl, test_dl, loss_fn, optimizer, epochs):
 
     torch.manual_seed(42)
     accuracy_metric = BinaryAccuracy().to(device)
@@ -19,21 +42,27 @@ def train_and_test(
     f1_metric = BinaryF1Score().to(device)
     
     for i, epoch in enumerate(range(epochs)):
+
         print(f"\nEpoch: {epoch+1}/{epochs}")
         train_loss = []
         model.train()
-        test_loss = []
 
+       # Before the test loop
         accuracy_metric.reset()
         precision_metric.reset()
         recall_metric.reset()
         f1_metric.reset()
        
         for batch, (X_train, y_train, idx) in tqdm(enumerate(train_dl), total=len(train_dl)):
-            X_train, y_train = X_train.to(device, dtype=torch.float32), y_train.to(device, dtype=torch.torch.float32)
+            
+            X_train, y_train = X_train.to(device, dtype=torch.float32), y_train.to(device, dtype=torch.float32)
+
+            assert not torch.isnan(X_train).any()
+            assert not torch.isnan(y_train).any()
+
 
             y_pred_with_logits = model(X_train)
-            y_pred = torch.round(torch.sigmoid(y_pred_with_logits))  
+            y_pred = torch.round(torch.sigmoid(y_pred_with_logits))  # Get probabilities
 
             loss = loss_fn(y_pred_with_logits, y_train)
             train_loss.append(loss.item())
@@ -50,10 +79,15 @@ def train_and_test(
 
         all_preds = []
         all_labels = []
-        all_idx = []
- 
+        all_idx = [] 
+        test_loss = []
+
         with torch.inference_mode():
             for X_test, y_test, idx in test_dl:
+
+                assert not torch.isnan(X_test).any()
+                assert not torch.isnan(y_test).any()
+
                 X_test, y_test = X_test.to(device, dtype=torch.float32),y_test.to(device, dtype=torch.float32)
 
                 y_pred_with_logits = model(X_test)
@@ -74,7 +108,6 @@ def train_and_test(
                 precision_metric.update(preds, y_test)
 
 
-
         # Test metrics 
         test_loss_avg = sum(test_loss) / len(test_loss)
         acc = accuracy_metric.compute()
@@ -85,6 +118,16 @@ def train_and_test(
         print(f"Test loss: {test_loss_avg:.5f}")
         print(f"Accuracy: {acc:.3f}")
         print(f"Precision: {prec:.3f} | Recall: {rec:.3f} | F1: {f1:.3f}")
+
+        # Early stopping call
+        early_stopping.check_early_stop(test_loss_avg)
+            
+        if early_stopping.stop_training:
+            print(f"Early stopping at epoch {epoch}")
+            break
+
+
+
         if i % 10 == 0:
 
             train_loss_avg = sum(train_loss) / len(train_loss)
@@ -96,7 +139,7 @@ def train_and_test(
             ax_loss.set_title(f"Epoch {epoch+1} Train Loss")
             ax_loss.set_xlabel("Batch")
             ax_loss.set_ylabel("Loss")
-            plt.show() 
+            plt.show() # Always use plt.show() to display current figure
 
             # Confusion matrix
             all_preds_np = torch.cat(all_preds).cpu().numpy()
@@ -131,7 +174,7 @@ def train_and_test(
 
 
 def evaluate(model, dataloader):
-    model.eval()  
+    model.eval()  # set model to evaluation mode
     all_preds = []
     all_labels = []
     all_indices = [] 
@@ -140,7 +183,7 @@ def evaluate(model, dataloader):
     recall_metric = BinaryRecall().to(device)
     f1_metric = BinaryF1Score().to(device)
     
-    with torch.no_grad(): 
+    with torch.no_grad():  # disable gradient computation
         for X, y, idx in dataloader:
             X, y = X.to(device, dtype=torch.float32), y.to(device, dtype=torch.float32)
 
@@ -182,3 +225,4 @@ def evaluate(model, dataloader):
 
     df.to_csv("cnn_predictions_vs_actual.csv", index=True)
     print("Saved: cnn_predictions_vs_actual.csv")
+    return 
